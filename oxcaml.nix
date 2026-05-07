@@ -33,21 +33,26 @@ let
   pname = "oxcaml";
 
   # We need to use this one specific version of menhir.
-  menhir =
-      (ocamlPackages.overrideScope (self: super: {
-        menhirLib = super.menhirLib.overrideAttrs (
-          new: old: rec {
-            version = "20231231";
-            src = pkgs.fetchFromGitLab {
-              domain = "gitlab.inria.fr";
-              owner = "fpottier";
-              repo = "menhir";
-              rev = version;
-              sha256 = "sha256-veB0ORHp6jdRwCyDDAfc7a7ov8sOeHUmiELdOFf/QYk=";
-            };
-          }
-        );
-      })).menhir;
+  menhir = (
+    ocamlPackages.overrideScope (self: super: {
+      menhirLib = super.menhirLib.override {
+        version = "20231231";
+      };
+
+      menhir = super.menhir.overrideAttrs {
+        buildInputs = [ self.menhirLib self.menhirSdk ];
+
+        # The patch in nixpkgs for --suggest-menhirLib does not apply to this
+        # version
+        patches = [ ];
+
+        # Replacement for the patch above
+        postInstall = ''
+          ln -s ${self.menhirLib}/lib/ocaml/*/site-lib/menhirLib $out/lib/
+        '';
+      };
+    })
+  ).menhir;
 in
 
 stdenv.mkDerivation (
@@ -61,7 +66,7 @@ stdenv.mkDerivation (
       let
         mkFlag = bool: name: if bool then "--enable-${name}" else "--disable-${name}";
       in
-      [ 
+      [
         (mkFlag runtime5 "runtime5")
         (mkFlag flambdaInvariants "flambda-invariants")
         (mkFlag optionalChecks "optional-checks")
