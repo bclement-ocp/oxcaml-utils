@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import os
 import json
+import pathlib
 
 def parse_target(rev):
     index = rev.find('/')
@@ -19,7 +20,17 @@ def parse_target(rev):
 
     return user, repo, rev
 
-def write_boot_ws(d, *, profile_dir):
+def write_boot_ws(d, *, profile_dir=None, with_annots=False):
+    if with_annots:
+        ocamlopt_flags = '(ocamlopt_flags (:standard -dfexpr-annot))'
+    else:
+        ocamlopt_flags = ''
+
+    if profile_dir is None:
+        ocamlparam = ''
+    else:
+        ocamlparam = f'("OCAMLPARAM" "_,dump-dir={profile_dir},dump-into-csv=1,profile=1")'
+
     with open(os.path.join(d, 'duneconf', 'boot.ws'), 'w') as f:
         f.write(f'''(lang dune 2.8)
 ; We need to call the boot context "default" so that dune selects it for merlin
@@ -28,14 +39,15 @@ def write_boot_ws(d, *, profile_dir):
   (profile main)
   (env (_
     (flags (:standard -warn-error +A -alert -unsafe_multidomain))
+    {ocamlopt_flags}
     (env-vars
         ("DUNE_JOBS" "1")
-        ("OCAMLPARAM" "_,dump-dir={profile_dir},dump-into-csv=1,profile=1")
+        {ocamlparam}
       )))))
 ''')
 
-def configure(d, *, profile_dir):
-    write_boot_ws(d, profile_dir=profile_dir)
+def configure(d, *, profile_dir=None, with_annots=False):
+    write_boot_ws(d, profile_dir=profile_dir, with_annots=with_annots)
 
     subprocess.call(["autoconf", "--force"], cwd=d)
     subprocess.call(["./configure", "--enable-runtime5", "--disable-optional-checks"], cwd=d)
@@ -58,7 +70,7 @@ index dde942a3a6..64b7dbb9fe 100644
 
 '''
 
-def main(repo, *, output, use_colley=False):
+def main(repo, *, output, use_colley=False, fexpr=False):
     try:
         os.makedirs(output, exist_ok=False)
     except FileExistsError:
@@ -88,19 +100,23 @@ def main(repo, *, output, use_colley=False):
         with open(os.path.join(pd, 'META.json'), 'w') as f:
             json.dump(meta, f)
 
-        profile_dir = os.path.join(pd, 'profile')
-        os.mkdir(profile_dir)
+        if not fexpr:
+            profile_dir = os.path.join(pd, 'profile')
+            os.mkdir(profile_dir)
+        else:
+            profile_dir = None
 
         configure(d, profile_dir=profile_dir)
 
-        with tempfile.TemporaryFile() as fp:
-            fp.write(patch.encode())
-            fp.seek(0)
+        if not fexpr:
+            with tempfile.TemporaryFile() as fp:
+                fp.write(patch.encode())
+                fp.seek(0)
 
-            code = subprocess.call(["patch", "-p1"], stdin=fp, cwd=d)
-            if code != 0:
-                print('error: patch failed')
-                exit(1)
+                code = subprocess.call(["patch", "-p1"], stdin=fp, cwd=d)
+                if code != 0:
+                    print('error: patch failed')
+                    exit(1)
 
         env = os.environ.copy()
         env["DUNE_JOBS"] = "1"
@@ -111,7 +127,17 @@ def main(repo, *, output, use_colley=False):
 
         subprocess.call(command, cwd=d, env=env)
 
-        print(f'stored profiles into: {profile_dir}')
+        if fexpr:
+            root = pathlib.Path(d) / '_build'
+            for fl in pathlib.Path(d).glob('**/*.simplify.fl'):
+                fl_rel = fl.relative_to(root)
+                fl_out = pd.joinpath(fl_rel)
+                fl_out.parent.mkdir(parents=True)
+                fl.copy(fl_out)
+
+            print(f'stored fexpr into: {d}')
+        else:
+            print(f'stored profiles into: {profile_dir}')
 
 if __name__ == "__main__":
     import argparse
@@ -124,9 +150,13 @@ if __name__ == "__main__":
     parser.add_argument('rev')
     parser.add_argument('-o', '--output', required=True)
 
+    fexpr = parser.add_mutually_exclusive_group()
+    fexpr.add_argument('--fexpr', default=False,
+                       action=argparse.BooleanOptionalAction)
+
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--use-colley', default=has_colley,
                        action=argparse.BooleanOptionalAction)
 
     ns = parser.parse_args()
-    main(ns.rev, output=ns.output, use_colley=ns.use_colley)
+    main(ns.rev, output=ns.output, use_colley=ns.use_colley, fexpr=ns.fexpr)
