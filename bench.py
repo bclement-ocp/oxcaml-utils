@@ -31,7 +31,7 @@ def write_boot_ws(d, *, profile_dir=None, params=None, flags=None):
     if profile_dir is not None:
         params = [f'dump-dir={profile_dir}', 'dump-into-csv=1', 'profile=1'] + params
 
-    ocamlparam = f'("OCAMLPARAM" "_,{','.join(params)}"'
+    ocamlparam = f'("OCAMLPARAM" "_,{','.join(params)}")'
 
     with open(os.path.join(d, 'duneconf', 'boot.ws'), 'w') as f:
         f.write(f'''(lang dune 2.8)
@@ -47,9 +47,6 @@ def write_boot_ws(d, *, profile_dir=None, params=None, flags=None):
         {ocamlparam}
       )))))
 ''')
-
-    with open(os.path.join(d, 'duneconf', 'boot.ws'), 'r') as f:
-      print(f.read())
 
 def configure(d, *, profile_dir=None, params=None, flags=None):
     write_boot_ws(d, profile_dir=profile_dir, params=params, flags=flags)
