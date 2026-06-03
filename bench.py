@@ -43,7 +43,6 @@ def write_boot_ws(d, *, profile_dir=None, params=None, flags=None):
     (flags (:standard -warn-error +A -alert -unsafe_multidomain))
     {ocamlopt_flags}
     (env-vars
-        ("DUNE_JOBS" "1")
         {ocamlparam}
       )))))
 ''')
@@ -55,7 +54,8 @@ def configure(d, *, profile_dir=None, params=None, flags=None):
     subprocess.call(["./configure", "--enable-runtime5", "--disable-optional-checks"], cwd=d)
 
 
-patch = '''
+def make_patch(*, jobs):
+    return f'''
 diff --git a/Makefile.common-ox b/Makefile.common-ox
 index dde942a3a6..64b7dbb9fe 100644
 --- a/Makefile.common-ox
@@ -65,14 +65,14 @@ index dde942a3a6..64b7dbb9fe 100644
  
  boot-compiler: _build/_bootinstall
 -	RUNTIME_DIR=$(RUNTIME_DIR) $(dune) build $(ws_boot) $(coverage_dune_flags) $(boot_targets)
-+	RUNTIME_DIR=$(RUNTIME_DIR) $(dune) build -j 1 $(ws_boot) $(coverage_dune_flags) $(boot_targets)
++	RUNTIME_DIR=$(RUNTIME_DIR) $(dune) build -j {jobs} $(ws_boot) $(coverage_dune_flags) $(boot_targets)
  
  boot-runtest: boot-compiler
  	RUNTIME_DIR=$(RUNTIME_DIR) $(dune) runtest $(ws_boot) $(coverage_dune_flags) --force
 
 '''
 
-def main(repo, *, output, use_colley=False, profile=True, params=None, flags=None):
+def main(repo, *, output, use_colley=False, profile=True, params, flags, jobs):
     try:
         os.makedirs(output, exist_ok=False)
     except FileExistsError:
@@ -110,9 +110,12 @@ def main(repo, *, output, use_colley=False, profile=True, params=None, flags=Non
 
         configure(d, profile_dir=profile_dir, params=params, flags=flags)
 
-        if profile:
+        if profile and not jobs:
+            jobs = 1
+
+        if profile or jobs:
             with tempfile.TemporaryFile() as fp:
-                fp.write(patch.encode())
+                fp.write(make_patch(jobs=jobs).encode())
                 fp.seek(0)
 
                 code = subprocess.call(["patch", "-p1"], stdin=fp, cwd=d)
@@ -121,11 +124,12 @@ def main(repo, *, output, use_colley=False, profile=True, params=None, flags=Non
                     exit(1)
 
         env = os.environ.copy()
-        env["DUNE_JOBS"] = "1"
+        env["DUNE_JOBS"] = str(jobs)
         command = ["make", "boot-compiler"]
 
         if use_colley:
-            command = ["colley-run", "1", "--"] + command
+            # TODO: use number of cpus as default instead of 1
+            command = ["colley-run", str(jobs or 1), "--"] + command
 
         subprocess.call(command, cwd=d, env=env)
 
@@ -157,6 +161,8 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--param', action='append', default=[])
     parser.add_argument('-f', '--flag', action='append', default=[])
 
+    parser.add_argument('-j', '--jobs', default=0, type=int)
+
     profile = parser.add_mutually_exclusive_group()
     profile.add_argument('--profile', default=True,
                        action=argparse.BooleanOptionalAction)
@@ -167,4 +173,4 @@ if __name__ == "__main__":
 
     ns = parser.parse_args()
     main(ns.rev, output=ns.output, use_colley=ns.use_colley, profile=ns.profile,
-         params=ns.param, flags=ns.flag)
+         params=ns.param, flags=ns.flag, jobs=ns.jobs)
