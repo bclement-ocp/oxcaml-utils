@@ -138,7 +138,7 @@ def main(repo, *, output, use_colley=False, profile=True, params, flags, jobs):
         for fl in pathlib.Path(d).glob('**/*.simplify.fl'):
             fl_rel = fl.relative_to(root)
             fl_out = pathlib.Path(fexpr_dir).joinpath(fl_rel)
-            fl_out.parent.mkdir(parents=True)
+            fl_out.parent.mkdir(parents=True, exist_ok=True)
             fl.copy(fl_out)
 
         if os.path.exists(fexpr_dir):
