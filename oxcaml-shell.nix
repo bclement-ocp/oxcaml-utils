@@ -5,14 +5,23 @@
 }:
 
 let
+  ocamlPackages = pkgs.ocaml-ng.ocamlPackages_5_4.overrideScope (self: super: {
+      dune_3 = super.dune_3.overrideAttrs rec {
+        version = "3.23.1";
+        src = pkgs.fetchurl {
+          url = "https://github.com/ocaml/dune/releases/download/${version}/dune-${version}.tbz";
+          hash = "sha256-k7TnFX9rqP62HPxfhgCO/SxZA3unigF9krSr8wYyNI8=";
+        };
+      };
+  });
+
   makeOxcaml = ocaml:
-    pkgs.ocamlPackages.callPackage (import ./oxcaml.nix {
+    ocamlPackages.callPackage (import ./oxcaml.nix {
           inherit version url hash;
         }) ({
-          ocamlPackages = pkgs.ocaml-ng.ocamlPackages_4_14;
           optionalChecks = false;
 
-          inherit ocaml;
+          inherit ocaml ocamlPackages;
         });
 
   oxcaml = makeOxcaml pkgs.ocaml-ng.ocamlPackages_5_4.ocaml;
