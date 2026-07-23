@@ -54,25 +54,7 @@ def configure(d, *, profile_dir=None, params=None, flags=None):
     subprocess.call(["./configure", "--enable-runtime5", "--disable-optional-checks"], cwd=d)
 
 
-def make_patch(*, jobs):
-    return f'''
-diff --git a/Makefile.common-ox b/Makefile.common-ox
-index dde942a3a6..64b7dbb9fe 100644
---- a/Makefile.common-ox
-+++ b/Makefile.common-ox
-@@ -81,7 +81,7 @@ boot_targets = \
-   ocamltest/ocamltest.native
- 
- boot-compiler: _build/_bootinstall
--	RUNTIME_DIR=$(RUNTIME_DIR) $(dune) build $(ws_boot) $(coverage_dune_flags) $(boot_targets)
-+	RUNTIME_DIR=$(RUNTIME_DIR) $(dune) build -j {jobs} $(ws_boot) $(coverage_dune_flags) $(boot_targets)
- 
- boot-runtest: boot-compiler
- 	RUNTIME_DIR=$(RUNTIME_DIR) $(dune) runtest $(ws_boot) $(coverage_dune_flags) --force
-
-'''
-
-def main(repo, *, output, use_colley=False, profile=True, params, flags, jobs):
+def main(repo, *, output, compiler_info=None, use_colley=False, profile=True, params, flags, jobs):
     try:
         os.makedirs(output, exist_ok=False)
     except FileExistsError:
@@ -97,13 +79,14 @@ def main(repo, *, output, use_colley=False, profile=True, params, flags, jobs):
             'rev': rev,
             'commit': commit,
         }
+        if compiler_info:
+            meta['compiler'] = compiler_info
 
-        pd = output
-        with open(os.path.join(pd, 'META.json'), 'w') as f:
-            json.dump(meta, f)
+        with open(os.path.join(output, 'META.json'), 'w') as f:
+            json.dump(meta, f, indent=2)
 
         if profile:
-            profile_dir = os.path.join(pd, 'profile')
+            profile_dir = os.path.join(output, 'profile')
             os.mkdir(profile_dir)
         else:
             profile_dir = None
@@ -112,16 +95,6 @@ def main(repo, *, output, use_colley=False, profile=True, params, flags, jobs):
 
         if profile and not jobs:
             jobs = 1
-
-        if profile or jobs:
-            with tempfile.TemporaryFile() as fp:
-                fp.write(make_patch(jobs=jobs).encode())
-                fp.seek(0)
-
-                code = subprocess.call(["patch", "-p1"], stdin=fp, cwd=d)
-                if code != 0:
-                    print('error: patch failed')
-                    exit(1)
 
         env = os.environ.copy()
         env["DUNE_JOBS"] = str(jobs)
@@ -133,7 +106,7 @@ def main(repo, *, output, use_colley=False, profile=True, params, flags, jobs):
 
         subprocess.call(command, cwd=d, env=env)
 
-        fexpr_dir = os.path.join(pd, 'fexpr')
+        fexpr_dir = os.path.join(output, 'fexpr')
         root = pathlib.Path(d) / '_build'
         for fl in pathlib.Path(d).glob('**/*.simplify.fl'):
             fl_rel = fl.relative_to(root)
@@ -142,10 +115,10 @@ def main(repo, *, output, use_colley=False, profile=True, params, flags, jobs):
             fl.copy(fl_out)
 
         if os.path.exists(fexpr_dir):
-          print(f'stored fexpr into: {fexpr_dir}')
+            print(f'stored fexpr into: {fexpr_dir}')
 
         if profile:
-          print(f'stored profiles into: {profile_dir}')
+            print(f'stored profiles into: {profile_dir}')
 
 if __name__ == "__main__":
     import argparse
@@ -157,6 +130,7 @@ if __name__ == "__main__":
 
     parser.add_argument('rev')
     parser.add_argument('-o', '--output', required=True)
+    parser.add_argument('--compiler-info', default=None, help="Optional tracking label for the compiler variant under test")
 
     parser.add_argument('-p', '--param', action='append', default=[])
     parser.add_argument('-f', '--flag', action='append', default=[])
@@ -172,5 +146,5 @@ if __name__ == "__main__":
                        action=argparse.BooleanOptionalAction)
 
     ns = parser.parse_args()
-    main(ns.rev, output=ns.output, use_colley=ns.use_colley, profile=ns.profile,
+    main(ns.rev, output=ns.output, compiler_info=ns.compiler_info, use_colley=ns.use_colley, profile=ns.profile,
          params=ns.param, flags=ns.flag, jobs=ns.jobs)
