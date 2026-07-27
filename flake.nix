@@ -35,6 +35,12 @@
               uv sync
               . .venv/bin/activate
             '';
+
+            nativeBuildInputs = with pkgs; [
+              stdenv.cc.cc.lib
+            ];
+
+            LD_LIBRARY_PATH = "$LD_LIBRARY_PATH:${pkgs.stdenv.cc.cc.lib}/lib";
           };
         }
       );
