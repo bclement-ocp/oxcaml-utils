@@ -108,7 +108,7 @@ def main(repo, *, output, compiler_info=None, use_colley=False, profile=True, pa
 
         fexpr_dir = os.path.join(output, 'fexpr')
         root = pathlib.Path(d) / '_build'
-        for fl in pathlib.Path(d).glob('**/*.simplify.fl'):
+        for fl in pathlib.Path(root).glob('**/*.fl'):
             fl_rel = fl.relative_to(root)
             fl_out = pathlib.Path(fexpr_dir).joinpath(fl_rel)
             fl_out.parent.mkdir(parents=True, exist_ok=True)

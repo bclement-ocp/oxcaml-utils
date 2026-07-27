@@ -5,11 +5,15 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "polars>=1.40.1",
-    "pyarrow>=25.0.0",
+    "patiencediff>=0.2.18",
+    "polars>=1.36.1",
 ]
-
 [dependency-groups]
 dev = [
+    "ipykernel>=7.1.0",
     "ipython>=9.13.0",
 ]
+[project.scripts]
+ox = "ox.cli:main"
+[tool.setuptools.package-data]
+ox = ["*.nix"]

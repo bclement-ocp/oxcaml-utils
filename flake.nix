@@ -12,6 +12,34 @@
       forAllSystems = lib.genAttrs lib.systems.flakeExposed;
     in
     {
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          python3Packages = pkgs.python3Packages;
+        in
+        {
+          default =
+            python3Packages.buildPythonApplication {
+              name = "ox";
+              pyproject = true;
+
+              src = ./.;
+
+              build-system = with python3Packages; [ setuptools ];
+
+              dependencies = with python3Packages; [
+                patiencediff
+                polars
+              ];
+
+              makeWrapperArgs = [
+                "--prefix PATH : ${lib.makeBinPath [ pkgs.nix ]}"
+              ];
+            };
+        }
+      );
+
       devShells = forAllSystems (
         system:
         let
