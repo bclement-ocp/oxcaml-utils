@@ -12,10 +12,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import textwrap
 from contextlib import ExitStack
 from dataclasses import dataclass, field
-from functools import cached_property
+from functools import cached_property, partial, partialmethod
 from typing import ClassVar
 
 import polars as pl
@@ -132,6 +131,7 @@ class OxcamlCompiler:
 class BenchmarkMode(enum.Enum):
     PROFILE = 0
     FEXPR = 1
+    INLINING_REPORT = 2
 
 
 @dataclass
@@ -166,7 +166,7 @@ class OxcamlConfiguration:
     def sha256(self):
         return hashlib.sha256(self.tojson().encode()).hexdigest()
 
-    def write_boot_ws(self, fp, *, dump_fexpr, profile_dir):
+    def write_boot_ws(self, fp, *, inlining_report, dump_fexpr, profile_dir):
         ocamlopt_flags = self.flags
         if dump_fexpr:
             ocamlopt_flags += ["-dfexpr-annot", "-dcanonical-ids", "-color", "never"]
@@ -174,6 +174,8 @@ class OxcamlConfiguration:
         ocamlparams = [f"{key}={value}" for key, value in self.params.items()]
         if profile_dir:
             ocamlparams += [f"dump-dir={profile_dir},dump-into-csv=1,profile=1"]
+        if inlining_report:
+            ocamlparams += ["inlining-report=1"]
 
         fp.write(f"""(lang dune 2.8)
 (context (default
@@ -296,6 +298,10 @@ class OxcamlBenchmark:
     def fexpr_path(self):
         return self.base_path / "fexpr.tar.gz"
 
+    @property
+    def inlining_report_path(self):
+        return self.base_path / "inlining_report.tar.gz"
+
     def _run(self, *, mode: BenchmarkMode, jobs=None):
         if not jobs or mode is BenchmarkMode.PROFILE:
             jobs = 1
@@ -310,7 +316,10 @@ class OxcamlBenchmark:
             boot_ws = os.path.join(build_dir, "duneconf", "boot.ws")
             with open(boot_ws, "w") as fp:
                 self.configuration.write_boot_ws(
-                    fp, profile_dir=profile_dir, dump_fexpr=mode is BenchmarkMode.FEXPR
+                    fp,
+                    profile_dir=profile_dir,
+                    dump_fexpr=mode is BenchmarkMode.FEXPR,
+                    inlining_report=mode is BenchmarkMode.INLINING_REPORT,
                 )
 
             build_sh = os.path.join(unpack_dir, "build.sh")
@@ -335,6 +344,13 @@ class OxcamlBenchmark:
 
                 logger.info(f"Stored fexpr output in {self.fexpr_path}")
 
+            if mode is BenchmarkMode.INLINING_REPORT:
+                self.inlining_report_path.parent.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(self.inlining_report_path, "x:gz") as tar:
+                    dune_dir = build_dir.joinpath("_build", "default")
+                    for path in dune_dir.glob("**/*.inlining.org"):
+                        tar.add(path, "inlining" / path.relative_to(dune_dir))
+
     def record_profile(self):
         logger.info("Recording profile for:")
         for line in str(self).splitlines():
@@ -358,6 +374,18 @@ class OxcamlBenchmark:
             self._run(mode=BenchmarkMode.FEXPR, **kwargs)
 
         return self.fexpr_path
+
+    def record_inlining(self, **kwargs):
+        logger.info("Recording inlining report for:")
+        for line in str(self).splitlines():
+            logger.info("    " + line)
+
+        if self.inlining_report_path.exists():
+            logger.info(f"Using cached results from: {self.inlining_report_path}")
+        else:
+            self._run(mode=BenchmarkMode.INLINING_REPORT, **kwargs)
+
+        return self.inlining_report_path
 
 
 def hierarchize_list(df_list):
@@ -503,7 +531,7 @@ def fexpr_line(s):
     return tuple(chunks)
 
 
-class FexprDiffer:
+class GenericDiffer:
     # Adapted from the stdlib's difflib.Differ
 
     PREFIXES: ClassVar[dict[str, str]] = {
@@ -515,13 +543,24 @@ class FexprDiffer:
 
     style_reset = "\033[0m"
 
+    context_lines = 3
+
+    def accept(self, name):
+        return True
+
+    def normalize(self, line):
+        return line
+
+    def chunks(self, line):
+        return line
+
     def compare(self, a, b):
 
-        a_norm = [normalize_line(line) for line in a]
-        b_norm = [normalize_line(line) for line in b]
+        a_norm = [self.normalize(line) for line in a]
+        b_norm = [self.normalize(line) for line in b]
 
         crunch = PatienceSequenceMatcher(None, a=a_norm, b=b_norm)
-        for group in crunch.get_grouped_opcodes(3):
+        for group in crunch.get_grouped_opcodes(self.context_lines):
             # Note: line numbers start at 1, not 0
             # Note: display lineno instead of lineno,1
             _, a_start, _, b_start, _ = group[0]
@@ -600,7 +639,7 @@ class FexprDiffer:
         # entirely.
         cutoff = 0.74999
         cruncher = difflib.SequenceMatcher(
-            lambda c: isinstance(c, str) and difflib.IS_CHARACTER_JUNK(c)
+            lambda c: isinstance(c, str) and difflib.IS_CHARACTER_JUNK(c),
         )
         crqr = cruncher.real_quick_ratio
         cqr = cruncher.quick_ratio
@@ -612,7 +651,7 @@ class FexprDiffer:
         best_i = best_j = None
         dump_i, dump_j = alo, blo  # smallest indices not yet resolved
         for j in range(blo, bhi):
-            cruncher.set_seq2(fexpr_line(b[j]))
+            cruncher.set_seq2(self.chunks(b[j]))
             # Search the corresponding i's within WINDOW for rhe highest
             # ratio greater than `cutoff`.
             aequiv = alo + (j - blo)
@@ -621,7 +660,7 @@ class FexprDiffer:
                 break
             best_ratio = cutoff
             for i in arange:
-                cruncher.set_seq1(fexpr_line(a[i]))
+                cruncher.set_seq1(self.chunks(a[i]))
                 # Ordering by cheapest to most expensive ratio is very
                 # valuable, most often getting out early.
                 if crqr() > best_ratio and cqr() > best_ratio and cr() > best_ratio:
@@ -638,8 +677,8 @@ class FexprDiffer:
             # do intraline marking on the synch pair
             aelt, belt = a[best_i], b[best_j]
             if aelt != belt:
-                aelt = fexpr_line(aelt)
-                belt = fexpr_line(belt)
+                aelt = self.chunks(aelt)
+                belt = self.chunks(belt)
                 atags = btags = ""
                 cruncher.set_seqs(aelt, belt)
                 for tag, ai1, ai2, bj1, bj2 in cruncher.get_opcodes():
@@ -688,8 +727,91 @@ class FexprDiffer:
             yield from self._dump("+", b, blo, bhi)
 
 
-def compare_diffs(prev_str, nexts):
-    differ = FexprDiffer()
+class FexprDiffer(GenericDiffer):
+    def accept(self, name):
+        return name.endswith(".fl")
+
+    def normalize(self, line):
+        return normalize_line(line)
+
+    def chunks(self, line):
+        return fexpr_line(line)
+
+
+INLINING_UID = re.compile(r"<<[a-f0-9]+>>")
+
+
+class Group:
+    def __init__(self, lines):
+        self._header = INLINING_UID.sub("<<>>", lines[0])
+        self.lines = lines
+
+    def __hash__(self):
+        return hash(self._header)
+
+    def __eq__(self, other):
+        if isinstance(other, Group):
+            return self._header == other._header
+
+        return NotImplemented
+
+
+class InliningDiffer(GenericDiffer):
+    context_lines = 30
+
+    def _group(self, a):
+        dump_i = 0
+        for i in range(len(a)):
+            if not a[i].startswith("*"):
+                continue
+
+            if a[dump_i:i]:
+                yield Group(a[dump_i:i])
+            dump_i = i
+
+        if a[dump_i:]:
+            yield Group(a[dump_i:])
+
+    def compare(self, a, b):
+        ga = list(self._group(a))
+        gb = list(self._group(b))
+
+        cruncher = difflib.SequenceMatcher(None, ga, gb, autojunk=False)
+
+        for tag, ai1, ai2, bj1, bj2 in cruncher.get_opcodes():
+            if tag == "equal":
+                for la, lb in zip(ga[ai1:ai2], gb[bj1:bj2]):
+                    yield from super().compare(la.lines, lb.lines)
+
+            else:
+                la = [line for g in ga[ai1:ai2] for line in g.lines]
+                lb = [line for g in gb[bj1:bj2] for line in g.lines]
+
+                yield from super().compare(la, lb)
+
+    # No fanciness
+    _fancy_replace = GenericDiffer._plain_replace
+
+    def accept(self, name):
+        return name.endswith(".inlining.org")
+
+    DEFINED_HERE = re.compile(r"\[\[[a-f0-9]+\]\[([a-z]+)\]\]")
+
+    def normalize(self, line):
+        line = INLINING_UID.sub("<<>>", line)
+        line = self.DEFINED_HERE.sub(r"[[][\1]]", line)
+        return line
+
+    SPLIT_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)")
+
+    def chunks(self, line):
+        return tuple(self.SPLIT_RE.split(line))
+
+
+def compare_diffs(prev_str, nexts, *, differ):
+    if differ is None:
+        differ = GenericDiffer()
+
     prev_lines = prev_str.splitlines(keepends=True)
 
     for next_str in nexts:
@@ -697,17 +819,17 @@ def compare_diffs(prev_str, nexts):
         yield from differ.compare(prev_lines, next_lines)
 
 
-def compare_tars(prev_tar: tarfile.TarFile, tars: list[tarfile.TarFile]):
+def compare_tars(prev_tar: tarfile.TarFile, tars: list[tarfile.TarFile], *, differ):
     try:
         for prev_info in prev_tar.getmembers():
             name = prev_info.name
-            if not name.endswith(".fl"):
+            if not prev_info.isfile() or not differ.accept(os.path.basename(name)):
                 continue
 
             prev = prev_tar.extractfile(name).read().decode("utf-8")
             nexts = [tar.extractfile(name).read().decode("utf-8") for tar in tars]
 
-            diff_lines = list(compare_diffs(prev, nexts))
+            diff_lines = list(compare_diffs(prev, nexts, differ=differ))
             if diff_lines:
                 _, name = name.split(os.sep, 1)
                 sys.stdout.write(f"\033[31m------\033[0m \033[1ma/{name}\033[0m\n")
@@ -718,7 +840,7 @@ def compare_tars(prev_tar: tarfile.TarFile, tars: list[tarfile.TarFile]):
 
 
 from copy import copy
-from optparse import Option, OptionParser, make_option
+from optparse import Option, OptionParser, Values, make_option
 
 
 def check_param(_option, _opt, value):
@@ -739,33 +861,12 @@ class OxOption(Option):
     TYPE_CHECKER["param"] = check_param
 
 
-oxcaml_benchmark_options = [
-    OxOption("-P", action="append", dest="params", type="param"),
-    make_option("-F", action="append", dest="flags"),
-]
-
-
-def parse_benchmarks(prog, args):
-    parser = OptionParser(usage=f"%prog {prog}", option_list=oxcaml_benchmark_options)
-    parser.disable_interspersed_args()
-
-    while args:
-        compiler = OxcamlCompiler(OxcamlRevision.parse(args[0]))
-        opts, args = parser.parse_args(args[1:])
-        config = OxcamlConfiguration(dict(opts.params or {}), opts.flags or [])
-        yield compiler, config
-
-
-def main():
-    logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
-
-    parser = OptionParser(
+class Cli:
+    parser: ClassVar[OptionParser] = OptionParser(
         description="An OxCaml revision manager",
         usage="%prog [options] command ...",
         option_class=OxOption,
     )
-    parser.disable_interspersed_args()
-
     parser.add_option(
         "-r",
         "--revision",
@@ -774,94 +875,163 @@ def main():
         type="revision",
     )
 
-    opts, args = parser.parse_args()
+    parser_fexpr = OptionParser(usage="%prog fexpr [options] ...")
+    parser_fexpr.add_option("-j", "--jobs", type=int, dest="jobs")
 
-    if not args:
-        parser.error("missing argument: command")
+    parser_fexpr_export = OptionParser(usage="%prog fexpr export [options] ...")
+    parser_fexpr_export.add_option(
+        "-g",
+        dest="glob",
+        help="only export files matching this pattern",
+    )
 
-    command, *args = args
+    parser_inlining = OptionParser(usage="%prog inlining [options] ...")
+    parser_inlining.add_option("-j", "--jobs", type=int, dest="jobs")
 
-    rev: OxcamlRevision = opts.rev
-    match command:
-        case "ocamlopt" | "opt":
-            OxcamlCompiler(rev).run("ocamlopt", *args)
+    parser_inlining_export = OptionParser(usage="%prog inlining export [options] ...")
+    parser_inlining_export.add_option(
+        "-g",
+        dest="glob",
+        help="only export files matching this pattern",
+    )
 
-        case "shell":
+    def _run(self, name, args=None, opts=None, *, dispatch):
+        parser = getattr(
+            self,
+            f"parser{name.replace(' ', '_')}",
+            OptionParser(usage=f"%prog{name.rstrip()}"),
+        )
+        parser.disable_interspersed_args()
+        opts_, args_ = parser.parse_args(args)
+
+        # Accumulate options from the command hierarchy
+        if opts is None:
+            opts = Values()
+        for attr, val in opts_.__dict__.items():
+            setattr(opts, attr, val)
+
+        dispatch(name, parser, opts, args_)
+
+    def _dispatch(self, name, parser: OptionParser, opts: Values, args: list[str]):
+        if not args:
+            parser.error("missing argument")
+
+        command, *args = args
+
+        if "_" in command:
+            parser.error("invalid command")
+
+        dispatch = getattr(self, f"run{name.replace(' ', '_')}_{command}", None)
+        if dispatch is None:
+            parser.error("invalid command")
+
+        self._run(f"{name} {command}", args, opts, dispatch=dispatch)
+
+    def _record(self, name, parser, opts, args, *, task, n=None):
+        benchmark_parser = OptionParser(usage=f"%prog{name}", option_class=OxOption)
+        benchmark_parser.add_option("-P", action="append", dest="params", type="param")
+        benchmark_parser.add_option("-F", action="append", dest="flags")
+        benchmark_parser.disable_interspersed_args()
+
+        benchmarks = []
+        while args and (n is None or len(benchmarks) < n):
+            compiler = OxcamlCompiler(OxcamlRevision.parse(args[0]))
+            bopts, args = benchmark_parser.parse_args(args[1:])
+            config = OxcamlConfiguration(dict(bopts.params or {}), bopts.flags or [])
+            benchmarks.append(OxcamlBenchmark(compiler, opts.rev, config))
+
+        if n is not None:
+            if len(benchmarks) != n:
+                parser.error(f"not enough configurations (expected {n})")
+
             if args:
-                parser.error("unexpected arguments for shell command")
+                parser.error(f"too many configurations (expected {n})")
 
-            OxcamlCompiler(rev).shell()
+        if not benchmarks:
+            parser.error("expected compiler configuration(s)")
 
-        case "profile":
-            profile_parser = OptionParser(usage="%prog profile [options] ...")
-            profile_parser.disable_interspersed_args()
-            profile_opts, args = profile_parser.parse_args(args)
+        return [task(benchmark) for benchmark in benchmarks]
 
-            if not args:
-                parser.error("missing argument for profile: record")
+    def _dump(self, name, parser, opts, args, *, task, n=None):
+        return self._record(
+            name, parser, opts, args, task=partial(task, jobs=opts.jobs), n=n
+        )
 
-            profile_cmd, *args = args
-            match profile_cmd:
-                case "record" | "report":
-                    record_parser = OptionParser(
-                        usage="%prog profile record [options] ..."
-                    )
-                    record_parser.disable_interspersed_args()
-                    _record_opts, args = record_parser.parse_args(args)
+    def _diff(self, name, parser, opts, args, *, task, differ):
+        paths = self._dump(name, parser, opts, args, task=task, n=2)
 
-                    df_list = []
-                    for compiler, config in parse_benchmarks("profile record", args):
-                        benchmark = OxcamlBenchmark(compiler, rev, config)
-                        profile_path = benchmark.record_profile()
+        if len(paths) != 2:
+            parser.error(
+                f"too many configuration provided for {name}"
+                f"(expected 2, got {len(paths)})"
+            )
 
-                        if profile_cmd != "record":
-                            df_list.append(pl.read_parquet(profile_path))
+        with ExitStack() as stack:
+            tars: list[tarfile.TarFile] = []
+            for path in paths:
+                tars.append(stack.enter_context(tarfile.open(path)))
 
-                    if df_list:
-                        print_timings(hierarchize_list(df_list))
+            if tars:
+                tar, *tars = tars
 
-                case _:
-                    parser.error(f"unknown profile subcommand: {profile_cmd}")
+                compare_tars(tar, tars, differ=differ)
 
-        case "fexpr":
-            fexpr_parser = OptionParser(usage="%prog fexpr [options] ...")
-            fexpr_parser.disable_interspersed_args()
-            fexpr_parser.add_option("-j", "--jobs", type=int, dest="jobs")
-            fexpr_opts, args = fexpr_parser.parse_args(args)
+    def _export(self, name, parser, opts, args, *, task):
+        if not args:
+            parser.error(f"{name} DST REV ...")
 
-            if not args:
-                parser.error("missing fexpr subcommand")
+        output, *args = args
+        (path,) = self._dump(name, parser, opts, args, task=task, n=1)
 
-            fexpr_command, *args = args
+        def filter(member: tarfile.TarInfo, path):
+            if opts.glob is None or pathlib.PurePath(member.name).match(opts.glob):
+                logger.info(f"Extracting {member.name}")
+                return tarfile.data_filter(member, path)
 
-            match fexpr_command:
-                case "dump" | "diff":
-                    benchmarks = list(parse_benchmarks(f"fexpr {fexpr_command}", args))
+        with tarfile.open(path) as tar:
+            tar.extractall(output, filter=filter)
 
-                    expected_len = 1 if fexpr_command == "dump" else 2
-                    if len(benchmarks) != expected_len:
-                        fexpr_parser.error(
-                            f"too many configuration provided for fexpr {fexpr_command} "
-                            f"(expected {expected_len}, got {len(benchmarks)})"
-                        )
+    def run(self):
+        self._run("", dispatch=self._dispatch)
 
-                    with ExitStack() as stack:
-                        tars: list[tarfile.TarFile] = []
-                        for compiler, config in benchmarks:
-                            benchmark = OxcamlBenchmark(compiler, rev, config)
-                            fexpr_path = benchmark.record_fexpr(jobs=fexpr_opts.jobs)
-                            tars.append(stack.enter_context(tarfile.open(fexpr_path)))
+    def run_ocamlopt(self, _name, _parser, opts: Values, args: list[str]):
+        OxcamlCompiler(opts.rev).run("ocamlopt", args)
 
-                        if tars and fexpr_command == "diff":
-                            tar, *tars = tars
+    run_opt = run_ocamlopt
 
-                            compare_tars(tar, tars)
+    def run_shell(self, name, parser, opts: Values, args: list[str]):
+        if args:
+            parser.error(f"unexpected arguments for {name} command")
 
-                case _:
-                    parser.error(f"unknown fexpr command: {fexpr_command}")
+        OxcamlCompiler(opts.rev).shell()
 
-        case _:
-            parser.error(f"unknown command: {command}")
+    run_profile = _dispatch
+    run_profile_record = partialmethod(_record, task=OxcamlBenchmark.record_profile)
+
+    def run_profile_report(self, name, parser, opts, args):
+        profiles = self.run_profile_record(name, parser, opts, args)
+        df_list = [pl.read_parquet(profile) for profile in profiles]
+        print_timings(hierarchize_list(df_list))
+
+    run_fexpr = _dispatch
+    run_fexpr_dump = partialmethod(_dump, task=OxcamlBenchmark.record_fexpr)
+    run_fexpr_diff = partialmethod(
+        _diff, task=OxcamlBenchmark.record_fexpr, differ=FexprDiffer()
+    )
+    run_fexpr_export = partialmethod(_export, task=OxcamlBenchmark.record_fexpr)
+
+    run_inlining = _dispatch
+    run_inlining_dump = partialmethod(_dump, task=OxcamlBenchmark.record_inlining)
+    run_inlining_diff = partialmethod(
+        _diff, task=OxcamlBenchmark.record_inlining, differ=InliningDiffer()
+    )
+    run_inlining_export = partialmethod(_export, task=OxcamlBenchmark.record_inlining)
+
+
+def main():
+    logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
+
+    Cli().run()
 
 
 if __name__ == "__main__":

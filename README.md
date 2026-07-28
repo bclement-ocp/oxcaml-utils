@@ -161,6 +161,19 @@ $ ox.py fexpr diff my-feature my-feature -f -my-flag
 ...
 ```
 
+#### ox.py fexpr export
+
+`ox.py fexpr export` can be used to export (some of) the fexpr files produced
+during a given compilation to a user-specified directory. It can be used as
+follows:
+
+```console
+$ ox.py fexpr export -g '*Typing_env.simplify.fl' output_dir my-feature
+```
+
+This will extract all the fexpr files matching the `-g` pattern into
+`output_dir`.
+
 # oxcaml-shell.py
 
 This script allows to setup a shell ready to build OxCaml with another version
