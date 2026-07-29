@@ -769,7 +769,7 @@ class FexprDiffer(GenericDiffer):
 class CmmDiffer(GenericDiffer):
     REFERENCE_RE = re.compile(r'(G|L):"[^"]+"')
     DEFINITION_RE = re.compile('"[^"]+":')
-    STAMP_RE = re.compile(r'\b([a-zA-Z0-9]+)/[0-9]+')
+    STAMP_RE = re.compile(r'\b([a-zA-Z_*][a-zA-Z_*0-9]+)/[0-9]+')
 
     def normalize(self, line):
         line = self.REFERENCE_RE.sub(r'\1', line)
