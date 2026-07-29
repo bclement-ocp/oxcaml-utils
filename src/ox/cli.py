@@ -132,6 +132,7 @@ class BenchmarkMode(enum.Enum):
     PROFILE = 0
     FEXPR = 1
     INLINING_REPORT = 2
+    CMM = 3
 
 
 @dataclass
@@ -166,10 +167,12 @@ class OxcamlConfiguration:
     def sha256(self):
         return hashlib.sha256(self.tojson().encode()).hexdigest()
 
-    def write_boot_ws(self, fp, *, inlining_report, dump_fexpr, profile_dir):
+    def write_boot_ws(self, fp, *, inlining_report, dump_fexpr, dump_cmm, profile_dir):
         ocamlopt_flags = self.flags
         if dump_fexpr:
             ocamlopt_flags += ["-dfexpr-annot", "-dcanonical-ids", "-color", "never"]
+        if dump_cmm:
+            ocamlopt_flags += ["-dcmm", "-dump-into-file", "-dcanonical-ids", "-color never"]
 
         ocamlparams = [f"{key}={value}" for key, value in self.params.items()]
         if profile_dir:
@@ -299,6 +302,10 @@ class OxcamlBenchmark:
         return self.base_path / "fexpr.tar.gz"
 
     @property
+    def cmm_path(self):
+        return self.base_path / "cmm.tar.gz"
+
+    @property
     def inlining_report_path(self):
         return self.base_path / "inlining_report.tar.gz"
 
@@ -319,6 +326,7 @@ class OxcamlBenchmark:
                     fp,
                     profile_dir=profile_dir,
                     dump_fexpr=mode is BenchmarkMode.FEXPR,
+                    dump_cmm=mode is BenchmarkMode.CMM,
                     inlining_report=mode is BenchmarkMode.INLINING_REPORT,
                 )
 
@@ -341,6 +349,15 @@ class OxcamlBenchmark:
                     dune_dir = build_dir.joinpath("_build", "default")
                     for path in dune_dir.glob("**/*.simplify.fl"):
                         tar.add(path, "simplify" / path.relative_to(dune_dir))
+
+                logger.info(f"Stored fexpr output in {self.fexpr_path}")
+
+            if mode is BenchmarkMode.CMM:
+                self.fexpr_path.parent.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(self.fexpr_path, "x:gz") as tar:
+                    dune_dir = build_dir.joinpath("_build", "default")
+                    for path in dune_dir.glob("**/*.cmx.dump"):
+                        tar.add(path, "cmm" / path.relative_to(dune_dir))
 
                 logger.info(f"Stored fexpr output in {self.fexpr_path}")
 
@@ -374,6 +391,18 @@ class OxcamlBenchmark:
             self._run(mode=BenchmarkMode.FEXPR, **kwargs)
 
         return self.fexpr_path
+
+    def record_cmm(self, **kwargs):
+        logger.info("Dumping cmm for:")
+        for line in str(self).splitlines():
+            logger.info("    " + line)
+
+        if self.cmm_path.exists():
+            logger.info(f"Using cached results from: {self.cmm_path}")
+        else:
+            self._run(mode=BenchmarkMode.CMM, **kwargs)
+
+        return self.cmm_path
 
     def record_inlining(self, **kwargs):
         logger.info("Recording inlining report for:")
@@ -737,6 +766,10 @@ class FexprDiffer(GenericDiffer):
     def chunks(self, line):
         return fexpr_line(line)
 
+class CmmDiffer(GenericDiffer):
+    def accept(self, name):
+        return name.endswith(".cmx.dump")
+
 
 INLINING_UID = re.compile(r"<<[a-f0-9]+>>")
 
@@ -1026,6 +1059,13 @@ class Cli:
         _diff, task=OxcamlBenchmark.record_inlining, differ=InliningDiffer()
     )
     run_inlining_export = partialmethod(_export, task=OxcamlBenchmark.record_inlining)
+
+    run_cmm = _dispatch
+    run_cmm_dump = partialmethod(_dump, task=OxcamlBenchmark.record_cmm)
+    run_cmm_diff = partialmethod(
+        _diff, task=OxcamlBenchmark.record_cmm, differ=CmmDiffer()
+    )
+    run_cmm_export = partialmethod(_export, task=OxcamlBenchmark.record_cmm)
 
 
 def main():
