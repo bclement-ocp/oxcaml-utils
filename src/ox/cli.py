@@ -353,13 +353,13 @@ class OxcamlBenchmark:
                 logger.info(f"Stored fexpr output in {self.fexpr_path}")
 
             if mode is BenchmarkMode.CMM:
-                self.fexpr_path.parent.mkdir(parents=True, exist_ok=True)
-                with tarfile.open(self.fexpr_path, "x:gz") as tar:
+                self.cmm_path.parent.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(self.cmm_path, "x:gz") as tar:
                     dune_dir = build_dir.joinpath("_build", "default")
                     for path in dune_dir.glob("**/*.cmx.dump"):
                         tar.add(path, "cmm" / path.relative_to(dune_dir))
 
-                logger.info(f"Stored fexpr output in {self.fexpr_path}")
+                logger.info(f"Stored cmm output in {self.cmm_path}")
 
             if mode is BenchmarkMode.INLINING_REPORT:
                 self.inlining_report_path.parent.mkdir(parents=True, exist_ok=True)
