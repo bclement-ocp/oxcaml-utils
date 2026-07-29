@@ -767,6 +767,19 @@ class FexprDiffer(GenericDiffer):
         return fexpr_line(line)
 
 class CmmDiffer(GenericDiffer):
+    REFERENCE_RE = re.compile(r'(G|L):"[^"]+"')
+    DEFINITION_RE = re.compile('"[^"]+":')
+
+    def normalize(self, line):
+        line = self.REFERENCE_RE.sub(r'\1', line)
+        line = self.DEFINITION_RE.sub(r':', line)
+        return line
+
+    CHUNK_RE = re.compile(r'([0-9]+|[a-zA-Z][a-zA-Z0-9]+)')
+
+    def chunks(self, line):
+        return tuple(self.CHUNK_RE.split(line))
+
     def accept(self, name):
         return name.endswith(".cmx.dump")
 
@@ -859,8 +872,11 @@ def compare_tars(prev_tar: tarfile.TarFile, tars: list[tarfile.TarFile], *, diff
             if not prev_info.isfile() or not differ.accept(os.path.basename(name)):
                 continue
 
-            prev = prev_tar.extractfile(name).read().decode("utf-8")
-            nexts = [tar.extractfile(name).read().decode("utf-8") for tar in tars]
+            try:
+                prev = prev_tar.extractfile(name).read().decode("utf-8")
+                nexts = [tar.extractfile(name).read().decode("utf-8") for tar in tars]
+            except UnicodeDecodeError:
+                print(f'Skipping file {name} due to unicode error')
 
             diff_lines = list(compare_diffs(prev, nexts, differ=differ))
             if diff_lines:
