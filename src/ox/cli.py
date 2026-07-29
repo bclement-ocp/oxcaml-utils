@@ -908,26 +908,6 @@ class Cli:
         type="revision",
     )
 
-    parser_fexpr = OptionParser(usage="%prog fexpr [options] ...")
-    parser_fexpr.add_option("-j", "--jobs", type=int, dest="jobs")
-
-    parser_fexpr_export = OptionParser(usage="%prog fexpr export [options] ...")
-    parser_fexpr_export.add_option(
-        "-g",
-        dest="glob",
-        help="only export files matching this pattern",
-    )
-
-    parser_inlining = OptionParser(usage="%prog inlining [options] ...")
-    parser_inlining.add_option("-j", "--jobs", type=int, dest="jobs")
-
-    parser_inlining_export = OptionParser(usage="%prog inlining export [options] ...")
-    parser_inlining_export.add_option(
-        "-g",
-        dest="glob",
-        help="only export files matching this pattern",
-    )
-
     def _run(self, name, args=None, opts=None, *, dispatch):
         parser = getattr(
             self,
@@ -1046,6 +1026,16 @@ class Cli:
         df_list = [pl.read_parquet(profile) for profile in profiles]
         print_timings(hierarchize_list(df_list))
 
+    parser_fexpr = OptionParser(usage="%prog fexpr [options] ...")
+    parser_fexpr.add_option("-j", "--jobs", type=int, dest="jobs")
+
+    parser_fexpr_export = OptionParser(usage="%prog fexpr export [options] ...")
+    parser_fexpr_export.add_option(
+        "-g",
+        dest="glob",
+        help="only export files matching this pattern",
+    )
+
     run_fexpr = _dispatch
     run_fexpr_dump = partialmethod(_dump, task=OxcamlBenchmark.record_fexpr)
     run_fexpr_diff = partialmethod(
@@ -1053,12 +1043,33 @@ class Cli:
     )
     run_fexpr_export = partialmethod(_export, task=OxcamlBenchmark.record_fexpr)
 
+    parser_inlining = OptionParser(usage="%prog inlining [options] ...")
+    parser_inlining.add_option("-j", "--jobs", type=int, dest="jobs")
+
+    parser_inlining_export = OptionParser(usage="%prog inlining export [options] ...")
+    parser_inlining_export.add_option(
+        "-g",
+        dest="glob",
+        help="only export files matching this pattern",
+    )
+
     run_inlining = _dispatch
     run_inlining_dump = partialmethod(_dump, task=OxcamlBenchmark.record_inlining)
     run_inlining_diff = partialmethod(
         _diff, task=OxcamlBenchmark.record_inlining, differ=InliningDiffer()
     )
     run_inlining_export = partialmethod(_export, task=OxcamlBenchmark.record_inlining)
+
+    parser_cmm = OptionParser(usage="%prog cmm [options] ...")
+    parser_cmm.add_option("-j", "--jobs", type=int, dest="jobs")
+
+    parser_cmm_export = OptionParser(usage="%prog cmm export [options] ...")
+    parser_cmm_export.add_option(
+        "-g",
+        dest="glob",
+        help="only export files matching this pattern",
+    )
+
 
     run_cmm = _dispatch
     run_cmm_dump = partialmethod(_dump, task=OxcamlBenchmark.record_cmm)
