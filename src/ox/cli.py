@@ -771,12 +771,16 @@ class CmmDiffer(GenericDiffer):
     DEFINITION_RE = re.compile('"[^"]+":')
     STAMP_RE = re.compile(r'\b([a-zA-Z_*][a-zA-Z_*0-9]*)/[0-9]+')
     CODE_ID_RE = re.compile(r'([a-zA-Z0-9_]+)_[0-9]+_[0-9]+')
+    EXIT_RE = re.compile(r'(\(exit\s+)[0-9]+\s+')
+    WITH_RE = re.compile(r'(with\s*\()[0-9]+\s+')
 
     def normalize(self, line):
         line = self.REFERENCE_RE.sub(r'\1', line)
         line = self.DEFINITION_RE.sub(r':', line)
         line = self.STAMP_RE.sub(r'\1', line)
         line = self.CODE_ID_RE.sub(r'\1', line)
+        line = self.EXIT_RE.sub(r'\1', line)
+        line = self.WITH_RE.sub(r'\1', line)
         return line
 
     CHUNK_RE = re.compile(r'([0-9]+|[a-zA-Z][a-zA-Z0-9]+)')
