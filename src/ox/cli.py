@@ -172,7 +172,12 @@ class OxcamlConfiguration:
         if dump_fexpr:
             ocamlopt_flags += ["-dfexpr-annot", "-dcanonical-ids", "-color", "never"]
         if dump_cmm:
-            ocamlopt_flags += ["-dcmm", "-dump-into-file", "-dcanonical-ids", "-color never"]
+            ocamlopt_flags += [
+                "-dcmm",
+                "-dump-into-file",
+                "-dcanonical-ids",
+                "-color never",
+            ]
 
         ocamlparams = [f"{key}={value}" for key, value in self.params.items()]
         if profile_dir:
@@ -766,6 +771,7 @@ class FexprDiffer(GenericDiffer):
     def chunks(self, line):
         return fexpr_line(line)
 
+
 class CmmDiffer(GenericDiffer):
     REFERENCE_RE = re.compile(r'(G|L):"[^"]+"')
     DEFINITION_RE = re.compile('"[^"]+":')
@@ -783,7 +789,7 @@ class CmmDiffer(GenericDiffer):
         line = self.WITH_RE.sub(r'\1', line)
         return line
 
-    CHUNK_RE = re.compile(r'([0-9]+|[a-zA-Z][a-zA-Z0-9]+)')
+    CHUNK_RE = re.compile(r"([0-9]+|[a-zA-Z][a-zA-Z0-9]+)")
 
     def chunks(self, line):
         return tuple(self.CHUNK_RE.split(line))
@@ -884,7 +890,7 @@ def compare_tars(prev_tar: tarfile.TarFile, tars: list[tarfile.TarFile], *, diff
                 prev = prev_tar.extractfile(name).read().decode("utf-8")
                 nexts = [tar.extractfile(name).read().decode("utf-8") for tar in tars]
             except UnicodeDecodeError:
-                print(f'Skipping file {name} due to unicode error')
+                print(f"Skipping file {name} due to unicode error")
 
             diff_lines = list(compare_diffs(prev, nexts, differ=differ))
             if diff_lines:
@@ -1042,13 +1048,59 @@ class Cli:
 
         OxcamlCompiler(opts.rev).shell()
 
+    parser_profile_report = OptionParser(usage="%prog profile report [options] ...")
+    parser_profile_report.add_option(
+        "-p", dest="filter_pass", action="append", help="filter pass name"
+    )
+    parser_profile_report.add_option(
+        "-n", dest="top_files", help="only display top N files", type=int
+    )
+
     run_profile = _dispatch
     run_profile_record = partialmethod(_record, task=OxcamlBenchmark.record_profile)
 
     def run_profile_report(self, name, parser, opts, args):
+        if opts.filter_pass:
+            pass_pat = r"|".join(f"(?:{pat})" for pat in opts.filter_pass)
+        else:
+            pass_pat = ""
+
         profiles = self.run_profile_record(name, parser, opts, args)
-        df_list = [pl.read_parquet(profile) for profile in profiles]
-        print_timings(hierarchize_list(df_list))
+        df_list = []
+        for profile in profiles:
+            df = pl.read_parquet(profile)
+
+            if pass_pat:
+                df = df.filter(pl.col("pass name").str.contains(r"(?:^$)|" + pass_pat))
+
+            df_list.append(df)
+
+        if opts.top_files is not None:
+            files = (
+                pl.concat(
+                    [
+                        df.filter(pl.col("pass name").str.contains(pass_pat))
+                        .group_by("file")
+                        .agg(pl.col("time").sum().alias(f"time_{i}"))
+                        for i, df in enumerate(df_list)
+                    ],
+                    how="align_left",
+                )
+                .select(
+                    pl.col("file"),
+                    pl.concat_list([f"time_{i}" for i in range(len(df_list))]).alias(
+                        "time"
+                    ),
+                )
+                .sort("time", descending=True)
+                .head(opts.top_files)["file"]
+            )
+
+            for f in files:
+                print(f)
+                print_timings(
+                    hierarchize_list([df.filter(pl.col("file") == f) for df in df_list])
+                )
 
     parser_fexpr = OptionParser(usage="%prog fexpr [options] ...")
     parser_fexpr.add_option("-j", "--jobs", type=int, dest="jobs")
@@ -1093,7 +1145,6 @@ class Cli:
         dest="glob",
         help="only export files matching this pattern",
     )
-
 
     run_cmm = _dispatch
     run_cmm_dump = partialmethod(_dump, task=OxcamlBenchmark.record_cmm)
