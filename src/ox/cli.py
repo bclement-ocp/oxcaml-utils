@@ -1075,7 +1075,9 @@ class Cli:
 
             df_list.append(df)
 
-        if opts.top_files is not None:
+        if opts.top_files is None:
+            print_timings(hierarchize_list(df_list))
+        else:
             files = (
                 pl.concat(
                     [
