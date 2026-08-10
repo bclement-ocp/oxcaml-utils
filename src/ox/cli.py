@@ -307,6 +307,10 @@ class OxcamlBenchmark:
         return self.base_path / "fexpr.tar.gz"
 
     @property
+    def size_path(self):
+        return self.base_path / "artifact_size.csv"
+
+    @property
     def cmm_path(self):
         return self.base_path / "cmm.tar.gz"
 
@@ -373,6 +377,35 @@ class OxcamlBenchmark:
                     for path in dune_dir.glob("**/*.inlining.org"):
                         tar.add(path, "inlining" / path.relative_to(dune_dir))
 
+            self.size_path.parent.mkdir(parents=True, exist_ok=True)
+            extensions = [
+                "exe",
+                "opt",
+                "a",
+                "cmxa",
+                "cma",
+                "cmi",
+                "cmx",
+                "cmo",
+                "cms",
+                "cmsi",
+                "cmt",
+                "cmti",
+                "o",
+            ]
+
+            with self.size_path.open("w") as csv_file:
+                csv_file.write("name,size_in_bytes\n")
+
+                install_path = pathlib.Path(build_dir).joinpath("_build", "default")
+                for ext in extensions:
+                    files = list(install_path.rglob(f"*.{ext}"))
+                    for file in files:
+                        if file.is_file() and not file.is_symlink():
+                            size = file.stat().st_size
+                            relative_path = file.relative_to(install_path)
+                            csv_file.write(f"{relative_path},{size}\n")
+
     def record_profile(self):
         logger.info("Recording profile for:")
         for line in str(self).splitlines():
@@ -420,6 +453,14 @@ class OxcamlBenchmark:
             self._run(mode=BenchmarkMode.INLINING_REPORT, **kwargs)
 
         return self.inlining_report_path
+
+    def report_size(self, **kwargs):
+        if self.size_path.exists():
+            logger.info(f"Using cached results from: {self.size_path}")
+        else:
+            self._run(mode=BenchmarkMode.FEXPR, **kwargs)
+
+        return self.size_path
 
 
 def hierarchize_list(df_list):
@@ -1154,6 +1195,49 @@ class Cli:
         _diff, task=OxcamlBenchmark.record_cmm, differ=CmmDiffer()
     )
     run_cmm_export = partialmethod(_export, task=OxcamlBenchmark.record_cmm)
+
+    parser_size = OptionParser(usage="%prog size [options] ...")
+    parser_size.add_option("-j", "--jobs", type=int, dest="jobs")
+
+    run_size = _dispatch
+
+    def run_size_report(self, name, parser, opts, args):
+        sizes = self._record(name, parser, opts, args, task=OxcamlBenchmark.report_size)
+
+        df_list = []
+        for i, path in enumerate(sizes):
+            df_list.append(
+                pl.read_csv(path)
+                .with_columns(
+                    pl.col("name").alias("file"),
+                    pl.col("name").str.split(".").list.last().alias("ext"),
+                )
+                .group_by("ext")
+                .agg(pl.col("size_in_bytes").sum().alias(f"size_in_bytes_{i}"))
+            )
+        df = pl.concat(df_list, how="align_left").select(
+            pl.col("ext"),
+            pl.concat_list([f"size_in_bytes_{i}" for i in range(len(sizes))]).alias(
+                "size_in_bytes"
+            ),
+        )
+
+        for ext, sizes in df.iter_rows():
+            main_size, *other_sizes = sizes
+            scale = 1
+            for prefix in ["B", "kB", "MB", "GB"]:
+                if main_size < 1024:
+                    break
+                scale *= 1024
+                main_size /= 1024
+
+            line = f"{ext} {main_size:>6.01f}{prefix} {'----':>5}%"
+            for size in other_sizes:
+                size /= scale
+                percent = (size - main_size) / main_size * 100
+                line += f" {size:>6.01f}{prefix} {percent:+5.01f}%"
+
+            print(line)
 
 
 def main():
