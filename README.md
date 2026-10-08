@@ -1,6 +1,45 @@
 A collection of utilities and scripts to build and benchmark OxCaml. Work in
 progress.
 
+# Installation and dependencies
+
+The `ox.py` script depends on the `patiencediff` and `polars` Python libraries
+to run. I recomment using [`uv`](https://docs.astral.sh/uv/) or
+[`nix`](https://nixos.org/) to take care of the installation for you.
+
+## Using `nix` (recommended)
+
+You can either point `nix run` directly at this repo:
+
+```console
+$ nix run github:bclement-ocp/oxcaml-utils -- profile record ...
+```
+
+or build it locally after cloning using:
+
+```console
+$ nix build
+$ ./result/bin/ox profile record ...
+```
+
+## Using `uv`
+
+First clone the repository then run:
+
+```console
+$ uv run ox.py -- profile record ...
+```
+
+## Manual installation
+
+Setup a Python environment and run:
+
+```console
+$ pip install patiencediff polars
+```
+
+You can then use the toplevel `ox.py` script (hopefully...).
+
 # ox.py
 
 This script is a swiss-knife utility for the OxCaml compiler developer.
