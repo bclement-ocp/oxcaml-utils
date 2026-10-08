@@ -29,9 +29,15 @@ let
         });
 
   oxcaml = makeOxcaml pkgs.ocaml-ng.ocamlPackages_5_4.ocaml;
+  profile2csv = ocamlPackages.buildDunePackage {
+    pname = "profile2csv";
+    version = "0.1";
+    src = ./vendor/profile2csv;
+  };
 in
 
 pkgs.mkShell {
     name = "oxcaml-shell";
+    nativeBuildInputs = [ profile2csv ];
     inputsFrom = [ (makeOxcaml oxcaml) ];
 }

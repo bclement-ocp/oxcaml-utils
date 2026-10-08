@@ -1,0 +1,5 @@
+(ocamllex main)
+
+(executable
+ (public_name profile2csv)
+ (name main))

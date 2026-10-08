@@ -1,0 +1,9 @@
+(lang dune 3.23)
+
+(name profile2csv)
+
+(package
+ (name profile2csv)
+ (depends ocaml))
+
+; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html

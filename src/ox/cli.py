@@ -21,9 +21,9 @@ import polars as pl
 from patiencediff import PatienceSequenceMatcher
 
 CACHE_HOME = pathlib.Path(os.getenv("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache")
-CACHE_DIR = CACHE_HOME.joinpath("ox")
+CACHE_DIR = pathlib.Path(os.getenv("OX_CACHE_DIR") or CACHE_HOME.joinpath("ox"))
 
-DEFAULT_REVISION = "5.4.0-ox2"
+DEFAULT_REVISION = "5.4.0-ox8"
 
 PACKAGE_DATA_ROOT = os.path.dirname(__file__)
 
@@ -49,7 +49,7 @@ class OxcamlRevision:
             index = value.find("/")
             if index < 0:
                 user = value
-                repo = "oxcaml"
+                repo = "ocaml" if user == "ocaml" else "oxcaml"
             else:
                 user, repo = value[:index], value[index + 1 :]
 
@@ -60,9 +60,28 @@ class OxcamlRevision:
         s = "" if not s and self.user == "oxcaml" else f"@{self.user}{s}"
         return self.rev + s
 
+    @property
+    def shorthand(self):
+        # CR bclement: this is very hackish (:
+        if self.user == "ocaml" and self.repo == "ocaml":
+            return self.rev.split("+")[0]
+
+        return str(self)
+
     @cached_property
     def url(self):
-        return f"https://github.com/{self.user}/{self.repo}/archive/{self.rev}.tar.gz"
+        ocaml_version = self.ocaml_version
+        if ocaml_version is None:
+            archive = self.rev
+        else:
+            archive, *_ = ocaml_version.split("+")
+        return f"https://github.com/{self.user}/{self.repo}/archive/{archive}.tar.gz"
+
+    @property
+    def ocaml_version(self):
+        # CR bclement: this is very hackish (:
+        if self.user == "ocaml" and self.repo == "ocaml":
+            return self.rev
 
     @cached_property
     def sha256(self):
@@ -101,24 +120,41 @@ class OxcamlCompiler:
         return str(self.revision)
 
     @property
+    def shorthand(self):
+        return self.revision.shorthand
+
+    @property
     def sha256(self):
         return self.revision.sha256
 
     def _run(self, *args, **kwargs):
-        args = (
-            "nix-shell",
-            "--argstr",
-            "url",
-            self.revision.url,
-            "--argstr",
-            "hash",
-            f"sha256:{self.revision.sha256}",
-            "--argstr",
-            "version",
-            self.revision.rev,
-            os.path.join(PACKAGE_DATA_ROOT, "oxcaml-shell.nix"),
-            *args,
-        )
+        if self.revision.ocaml_version in ("5.4.1", "5.4.1+flambda"):
+            flambda_support = (
+                "true" if self.revision.rev.endswith("+flambda") else "false"
+            )
+            args = (
+                "nix-shell",
+                "--arg",
+                "flambdaSupport",
+                flambda_support,
+                os.path.join(PACKAGE_DATA_ROOT, "ocaml-shell.nix"),
+                *args,
+            )
+        else:
+            args = (
+                "nix-shell",
+                "--argstr",
+                "url",
+                self.revision.url,
+                "--argstr",
+                "hash",
+                f"sha256:{self.revision.sha256}",
+                "--argstr",
+                "version",
+                self.revision.rev,
+                os.path.join(PACKAGE_DATA_ROOT, "oxcaml-shell.nix"),
+                *args,
+            )
         return subprocess.run(args, **kwargs)  # noqa: PLW1510
 
     def shell(self):
@@ -133,6 +169,11 @@ class BenchmarkMode(enum.Enum):
     FEXPR = 1
     INLINING_REPORT = 2
     CMM = 3
+    RUNTIME = 4
+
+    @property
+    def requires_profiling(self):
+        return self is BenchmarkMode.PROFILE or self is BenchmarkMode.RUNTIME
 
 
 @dataclass
@@ -147,6 +188,16 @@ class OxcamlConfiguration:
             sort_keys=True,
             separators=(",", ":"),
         )
+
+    @property
+    def shorthand(self):
+        info = list(self.flags)
+        for key, value in self.params.items():
+            if value == "1":
+                info += [key]
+            else:
+                info += [f"{key}={value}"]
+        return " ".join(info)
 
     def __str__(self):
         if self.params:
@@ -181,7 +232,8 @@ class OxcamlConfiguration:
 
         ocamlparams = [f"{key}={value}" for key, value in self.params.items()]
         if profile_dir:
-            ocamlparams += [f"dump-dir={profile_dir},dump-into-csv=1,profile=1"]
+            # XXX: oxcaml should use dump-into-csv
+            ocamlparams += [f"dump-dir={profile_dir},dump-into-file=1,profile=1"]
         if inlining_report:
             ocamlparams += ["inlining-report=1"]
 
@@ -197,13 +249,36 @@ class OxcamlConfiguration:
             ("COLUMNS" "{self.columns}"))))))
 """)
 
-    def write_build_sh(self, fp, *, use_colley=None, build_dir, jobs):
+    def write_build_sh(
+        self,
+        fp,
+        target,
+        *,
+        use_colley=None,
+        profile_dir,
+        build_dir: pathlib.Path,
+        jobs: int,
+    ):
         if use_colley is None:
             use_colley = bool(shutil.which("colley-run"))
 
-        make_cmd = "make boot-compiler"
+        make_cmd = f"make {target}"
         if use_colley:
             make_cmd = f"colley-run {jobs} -- {make_cmd}"
+
+        ocamlparams: list[str] = []
+        if profile_dir is not None:
+            # XXX: oxcaml should use dump-into-csv
+            ocamlparams += [
+                f"dump-dir={profile_dir}/runtime,dump-into-file=1,profile=1"
+            ]
+
+        extra = ""
+        if profile_dir:
+            extra = f"""
+            find {shlex.quote(os.fspath(profile_dir))} -name 'profile.*.dump' \\
+                -exec sh -c 'for f do profile2csv < "$f" > "${{f/.dump/.csv}}"; done' sh {{}} \\;
+            """
 
         fp.write(f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -214,7 +289,9 @@ autoconf --force
 ./configure --enable-runtime5 --disable-optional-checks
 
 export DUNE_JOBS={jobs}
+export OCAMLPARAM={",".join(["_"] + ocamlparams)}
 {make_cmd}
+{extra}
 """)
 
 
@@ -239,7 +316,7 @@ def parse_memory(s):
 
 
 def parse_counters(s):
-    components = s.lstrip("[").rstrip("]").strip().split(";")
+    components = s.strip().split(",")
     components = [
         dict(zip(["counter", "value"], (s.strip() for s in component.split("="))))
         for component in components
@@ -247,10 +324,18 @@ def parse_counters(s):
     return components
 
 
-def read_profile_csv(profile_path):
-    df = pl.read_csv(profile_path)
-    df = df.with_columns(pl.col("time").str.strip_suffix("s").cast(pl.Float64))
+def append_profile_csv(profiles, profile_path):
+    try:
+        df = pl.read_csv(profile_path)
+    except pl.exceptions.NoDataError:
+        return
+
+    pass_names = df.get_column("pass name")
+    if pass_names.is_empty() or pass_names[0] is None:
+        return
+
     fname = df.get_column("pass name")[0].removeprefix("file=").rstrip("/")
+    df = df.with_columns(pl.col("time").cast(pl.Float64))
     df = df.with_columns(
         (
             "/"
@@ -262,9 +347,9 @@ def read_profile_csv(profile_path):
         .alias("pass name")
     )
     df = df.with_columns(
-        pl.col("alloc").map_elements(parse_memory, return_dtype=pl.Int64),
-        pl.col("top-heap").map_elements(parse_memory, return_dtype=pl.Int64),
-        pl.col("absolute-top-heap").map_elements(parse_memory, return_dtype=pl.Int64),
+        pl.col("alloc").cast(pl.Int64),
+        pl.col("top heap").cast(pl.Int64),
+        pl.col("absolute top heap").cast(pl.Int64),
     )
     df = df.with_columns(
         pl.col("counters").map_elements(
@@ -273,8 +358,7 @@ def read_profile_csv(profile_path):
         )
     )
     df = df.insert_column(0, pl.lit(fname).alias("file"))
-    df = df.rename({"top-heap": "top heap", "absolute-top-heap": "absolute top heap"})
-    return df
+    profiles.append(df)
 
 
 @dataclass
@@ -293,14 +377,22 @@ class OxcamlBenchmark:
         )
 
     @property
+    def shorthand(self):
+        return self.compiler.shorthand + " " + self.configuration.shorthand
+
+    @property
     def base_path(self):
         return CACHE_DIR.joinpath(
             self.compiler.sha256, self.revision.sha256, self.configuration.sha256
         )
 
     @property
-    def profile_path(self):
-        return self.base_path / "profile.parquet"
+    def build_profile_path(self):
+        return self.base_path / "build_profile.parquet"
+
+    @property
+    def runtime_profile_path(self):
+        return self.base_path / "runtime_profile.parquet"
 
     @property
     def fexpr_path(self):
@@ -319,13 +411,15 @@ class OxcamlBenchmark:
         return self.base_path / "inlining_report.tar.gz"
 
     def _run(self, *, mode: BenchmarkMode, jobs=None):
-        if not jobs or mode is BenchmarkMode.PROFILE:
+        if not jobs or mode.requires_profiling:
             jobs = 1
 
         profile_dir = None
+        boot_profile_dir = None
         with tempfile.TemporaryDirectory() as unpack_dir:
-            if mode is BenchmarkMode.PROFILE:
+            if mode.requires_profiling:
                 profile_dir = os.path.join(unpack_dir, "profile")
+                boot_profile_dir = os.path.join(profile_dir, "build")
 
             build_dir = self.revision.unpack(os.path.join(unpack_dir, "source"))
 
@@ -333,24 +427,41 @@ class OxcamlBenchmark:
             with open(boot_ws, "w") as fp:
                 self.configuration.write_boot_ws(
                     fp,
-                    profile_dir=profile_dir,
+                    profile_dir=boot_profile_dir,
                     dump_fexpr=mode is BenchmarkMode.FEXPR,
                     dump_cmm=mode is BenchmarkMode.CMM,
                     inlining_report=mode is BenchmarkMode.INLINING_REPORT,
                 )
 
             build_sh = os.path.join(unpack_dir, "build.sh")
+            target = "boot-compiler"
+            if mode is BenchmarkMode.RUNTIME:
+                target = "compiler"
             with open(build_sh, "w") as fp:
-                self.configuration.write_build_sh(fp, build_dir=build_dir, jobs=jobs)
+                self.configuration.write_build_sh(
+                    fp,
+                    target,
+                    profile_dir=profile_dir,
+                    build_dir=build_dir,
+                    jobs=jobs,
+                )
 
             self.compiler.run("bash", build_sh)
 
             if profile_dir is not None:
-                self.profile_path.parent.mkdir(parents=True, exist_ok=True)
-                pl.concat(
-                    read_profile_csv(p)
-                    for p in list(pathlib.Path(profile_dir).glob("**/*.csv"))
-                ).write_parquet(self.profile_path)
+                self.build_profile_path.parent.mkdir(parents=True, exist_ok=True)
+                build_profiles = []
+                for p in pathlib.Path(profile_dir).joinpath("build").glob("**/*.csv"):
+                    append_profile_csv(build_profiles, p)
+                pl.concat(build_profiles).write_parquet(self.build_profile_path)
+                if mode is BenchmarkMode.RUNTIME:
+                    self.runtime_profile_path.parent.mkdir(parents=True, exist_ok=True)
+                    runtime_profiles = []
+                    for p in (
+                        pathlib.Path(profile_dir).joinpath("runtime").glob("**/*.csv")
+                    ):
+                        append_profile_csv(runtime_profiles, p)
+                    pl.concat(runtime_profiles).write_parquet(self.runtime_profile_path)
 
             if mode is BenchmarkMode.FEXPR:
                 self.fexpr_path.parent.mkdir(parents=True, exist_ok=True)
@@ -411,12 +522,24 @@ class OxcamlBenchmark:
         for line in str(self).splitlines():
             logger.info("    " + line)
 
-        if self.profile_path.exists():
-            logger.info(f"Using cached results from: {self.profile_path}")
+        if self.build_profile_path.exists():
+            logger.info(f"Using cached results from: {self.build_profile_path}")
         else:
             self._run(mode=BenchmarkMode.PROFILE)
 
-        return self.profile_path
+        return (self.shorthand, self.build_profile_path)
+
+    def record_runtime(self):
+        logger.info("Recording runtime for:")
+        for line in str(self).splitlines():
+            logger.info("    " + line)
+
+        if self.runtime_profile_path.exists():
+            logger.info(f"Using cached results from: {self.runtime_profile_path}")
+        else:
+            self._run(mode=BenchmarkMode.RUNTIME)
+
+        return (self.shorthand, self.runtime_profile_path)
 
     def record_fexpr(self, **kwargs):
         logger.info("Dumping fexpr for:")
@@ -460,19 +583,57 @@ class OxcamlBenchmark:
         else:
             self._run(mode=BenchmarkMode.FEXPR, **kwargs)
 
-        return self.size_path
+        return self
 
 
-def hierarchize_list(df_list):
+def fix_one_pass_name(s):
+    if s.startswith("/file="):
+        parts = s[len("/file=") :].split("/")
+        for index, part in enumerate(parts):
+            if "." in part:
+                break
+        fname, pname = parts[: index + 1], parts[index + 1 :]
+        return "/".join(pname)
+
+    return s
+
+
+def extract_file(s):
+    if s["pass name"].startswith("/file="):
+        parts = s["pass name"][len("/file=") :].split("/")
+        for index, part in enumerate(parts):
+            if "." in part:
+                break
+        fname, pname = parts[: index + 1], parts[index + 1 :]
+        return "/".join(fname)
+
+    return s["file"]
+
+
+def fix_pass_name(df):
+    df = df.with_columns(
+        pl.col("pass name").map_elements(
+            fix_one_pass_name, return_dtype=pl.self_dtype()
+        ),
+        pl.struct("file", "pass name")
+        .map_elements(extract_file, return_dtype=pl.String)
+        .alias("file"),
+    )
+    return df.filter(pl.col("file") != "load_visible_dirs")
+
+
+def hierarchize_list(df_list, *, column="time"):
     df_time = pl.concat(
         [
-            df.group_by("pass name").agg(pl.col("time").sum().alias(f"time_{i}"))
+            df.group_by("pass name").agg(pl.col(column).sum().alias(f"{column}_{i}"))
             for i, df in enumerate(df_list)
         ],
-        how="align_left",
+        how="align",
     ).select(
         pl.col("pass name"),
-        pl.concat_list([f"time_{i}" for i in range(len(df_list))]).alias("time"),
+        pl.concat_list(
+            [pl.coalesce(pl.col(f"{column}_{i}"), 0.0) for i in range(len(df_list))]
+        ).alias(column),
     )
 
     data = {}
@@ -483,7 +644,13 @@ def hierarchize_list(df_list):
         for component in pass_name:
             current = current.setdefault(component, {})
         current[""] = time
-    return data
+
+    prefix = []
+    while len(data) == 1:
+        pass_name = list(data.keys())[0]
+        prefix.append(pass_name)
+        data = data[pass_name]
+    return "/".join(prefix), data
 
 
 def hierarchize(df):
@@ -502,36 +669,64 @@ def hierarchize(df):
     return data
 
 
-def print_timings(timings, name="", *, depth=0, prefix="", total=None, max_depth=None):
+def print_timings(
+    timings,
+    name="",
+    *,
+    depth=0,
+    prefix="",
+    total=None,
+    max_depth=None,
+    abstime=False,
+    unit="s",
+):
     if max_depth is not None and depth > max_depth:
         return
 
-    twidth = 6
-    pwidth = 5
+    scale_prefixes = ["k", "M", "G"]
+
+    twidth = 7
+    pwidth = 6
 
     if total is None:
         extra_prefix = ""
-        total = timings.get("", [0.0])[0]
+        total = timings.get("", [0.0])
     else:
         extra_prefix = "  | "
 
     line = ""
     first = True
     reference = None
-    for time in timings.get("", []):
+    for time, total_time in zip(timings.get("", []), total):
         if not time:
-            line += f"{'----':>{twidth}}  {'':>{pwidth}}  "
+            line += f"{'----':>{twidth}}  "
+            if not abstime:
+                line += f"{'':>{pwidth}}  "
         else:
-            if reference is None:
+            if reference is None or abstime:
                 palign = ">"
-                percent = (time / total) * 100
+
+                if not total_time:
+                    percent = 100
+                else:
+                    percent = (time / total_time) * 100
 
                 if first:
                     reference = time
             else:
+                # Delta relative to the total time of the reference run
                 palign = "+"
-                percent = (time - reference) / total * 100
-            line += f"{time:>{twidth}.02f}s {percent:{palign}{pwidth}.01f}% "
+                percent = (time - reference) / total[0] * 100
+            scale_index = 0
+            scale = unit
+            if unit != "s":
+                while scale_index < len(scale_prefixes) and time > 1024:
+                    scale = scale_prefixes[scale_index] + unit
+                    time /= 1024
+                    scale_index += 1
+            line += f"{time:>{twidth}.02f}{scale} "
+            if not abstime:
+                line += f"{percent:{palign}{pwidth}.01f}% "
 
         first = False
     print(f"{prefix}{extra_prefix.replace('|', '+')}{line}{name}")
@@ -545,6 +740,8 @@ def print_timings(timings, name="", *, depth=0, prefix="", total=None, max_depth
             prefix=prefix + extra_prefix,
             total=total,
             max_depth=max_depth,
+            abstime=abstime,
+            unit=unit,
         )
 
 
@@ -965,6 +1162,40 @@ class OxOption(Option):
     TYPE_CHECKER["param"] = check_param
 
 
+def str_bytes(b):
+    for unit in ["B", "kB", "MB", "GB"]:
+        if b < 1024:
+            break
+
+        b /= 1024
+
+    return f"{b:.01f}{unit}"
+
+
+def process_size(s):
+    reference = s.drop_nulls().max()
+    scale = 1
+    for unit in ["B", "kB", "MB", "GB"]:
+        if reference < 1024:
+            break
+
+        scale *= 1024
+        reference /= 1024
+
+    return pl.struct(
+        (s / scale).round_sig_figs(3).alias(f"{s.name}"),
+        pl.lit(unit).alias(f"{s.name} unit"),
+        (s / s.drop_nulls().first()).round(1).alias(f"{s.name} (rel)"),
+    )
+
+
+def process_time(s):
+    return pl.struct(
+        s.round_sig_figs(3).alias(f"{s.name} (s)"),
+        (s / s.drop_nulls().first()).round(1).alias(f"{s.name} (rel)"),
+    )
+
+
 class Cli:
     parser: ClassVar[OptionParser] = OptionParser(
         description="An OxCaml revision manager",
@@ -1036,6 +1267,131 @@ class Cli:
 
         return [task(benchmark) for benchmark in benchmarks]
 
+    def _report(self, name, parser, opts, args, *, task):
+        profiles = self._record(name, parser, opts, args, task=task)
+
+        df_list = []
+        for _, profile in profiles:
+            df = pl.read_parquet(profile)
+
+            df_list.append(df)
+
+        max_depth = opts.max_depth
+
+        column = opts.column or "time"
+        unit = "s" if column == "time" else "B"
+
+        if opts.top_files is None:
+            name, timings = hierarchize_list(df_list, column=column)
+            print_timings(
+                timings, name=name, max_depth=max_depth, unit=unit, abstime=False
+            )
+        else:
+            files = (
+                pl.concat(
+                    [
+                        df.filter(pl.col("pass name").str.contains(pass_pat))
+                        .group_by("file")
+                        .agg(pl.col("time").sum().alias(f"time_{i}"))
+                        for i, df in enumerate(df_list)
+                    ],
+                    how="align_left",
+                )
+                .select(
+                    pl.col("file"),
+                    pl.concat_list([f"time_{i}" for i in range(len(df_list))]).alias(
+                        "time"
+                    ),
+                )
+                .sort("time", descending=True)
+                .head(opts.top_files)["file"]
+            )
+
+            for f in files:
+                print(f)
+                name, timings = hierarchize_list(
+                    [df.filter(pl.col("file") == f) for df in df_list]
+                )
+                print_timings(timings, name=name, max_depth=max_depth)
+
+        df_list = []
+        for configuration, profile in profiles:
+            df = pl.read_parquet(profile)
+
+            df = df.with_columns(pl.col("pass name").str.strip_chars_start("/"))
+
+            df = df.group_by("pass name").agg(
+                pl.col("time").sum(), pl.col("alloc").sum()
+            )
+
+            df = df.select(
+                pl.lit(configuration).alias("configuration"),
+                pl.col("pass name"),
+                pl.col("time"),
+                pl.col("alloc"),
+            )
+
+            df_list.append(df)
+
+        df = pl.concat(df_list)
+
+        cols = [pl.col(""), pl.col("configuration")]
+        if opts.filter_pass:
+            cols += [
+                pl.coalesce(pl.col(pass_name), pl.lit(None)).alias(pass_name)
+                for pass_name in opts.filter_pass
+            ]
+
+        df_time = (
+            df.pivot("pass name", index="configuration", values="time")
+            .select(cols)
+            .map_columns(
+                pl.selectors.exclude("configuration"),
+                lambda s: process_time(s.alias("time")),
+            )
+            .unpivot(
+                None,
+                index="configuration",
+                variable_name="pass name",
+                value_name="time",
+            )
+        )
+        df_alloc = (
+            df.pivot("pass name", index="configuration", values="alloc")
+            .select(cols)
+            .map_columns(
+                pl.selectors.exclude("configuration"),
+                lambda s: process_size(s.alias("alloc")),
+            )
+            .unpivot(
+                None,
+                index="configuration",
+                variable_name="pass name",
+                value_name="alloc",
+            )
+        )
+        df = df_time.join(df_alloc, on=["configuration", "pass name"])
+        df = (
+            df.select("pass name", "configuration", "time", "alloc")
+            .unnest("time", "alloc")
+            .with_columns(pl.format("{}{}", "alloc", "alloc unit").alias("alloc"))
+            .select(pl.all().exclude("alloc unit"))
+        )
+
+        with pl.Config(
+            tbl_hide_dataframe_shape=True,
+            tbl_hide_column_data_types=True,
+            tbl_formatting="ASCII_MARKDOWN",
+            tbl_rows=-1,
+            tbl_cols=-1,
+            tbl_cell_numeric_alignment="RIGHT",
+        ):
+            for (pass_name,), pass_df in df.group_by("pass name", maintain_order=True):
+                print(f"## {pass_name}")
+                print()
+                print(pass_df.select(pl.all().exclude("pass name")))
+                print()
+
     def _dump(self, name, parser, opts, args, *, task, n=None):
         return self._record(
             name, parser, opts, args, task=partial(task, jobs=opts.jobs), n=n
@@ -1096,54 +1452,34 @@ class Cli:
     parser_profile_report.add_option(
         "-n", dest="top_files", help="only display top N files", type=int
     )
+    parser_profile_report.add_option(
+        "-d", dest="max_depth", help="max depth of passes to print", type=int
+    )
+    parser_profile_report.add_option(
+        "-c", dest="column", help="column to print", type=str
+    )
 
     run_profile = _dispatch
     run_profile_record = partialmethod(_record, task=OxcamlBenchmark.record_profile)
+    run_profile_report = partialmethod(_report, task=OxcamlBenchmark.record_profile)
 
-    def run_profile_report(self, name, parser, opts, args):
-        if opts.filter_pass:
-            pass_pat = r"|".join(f"(?:{pat})" for pat in opts.filter_pass)
-        else:
-            pass_pat = ""
+    parser_runtime_report = OptionParser(usage="%prog runtime report [options] ...")
+    parser_runtime_report.add_option(
+        "-p", dest="filter_pass", action="append", help="filter pass name"
+    )
+    parser_runtime_report.add_option(
+        "-n", dest="top_files", help="only display top N files", type=int
+    )
+    parser_runtime_report.add_option(
+        "-d", dest="max_depth", help="max depth of passes to print", type=int
+    )
+    parser_runtime_report.add_option(
+        "-c", dest="column", help="column to print", type=str
+    )
 
-        profiles = self.run_profile_record(name, parser, opts, args)
-        df_list = []
-        for profile in profiles:
-            df = pl.read_parquet(profile)
-
-            if pass_pat:
-                df = df.filter(pl.col("pass name").str.contains(r"(?:^$)|" + pass_pat))
-
-            df_list.append(df)
-
-        if opts.top_files is None:
-            print_timings(hierarchize_list(df_list))
-        else:
-            files = (
-                pl.concat(
-                    [
-                        df.filter(pl.col("pass name").str.contains(pass_pat))
-                        .group_by("file")
-                        .agg(pl.col("time").sum().alias(f"time_{i}"))
-                        for i, df in enumerate(df_list)
-                    ],
-                    how="align_left",
-                )
-                .select(
-                    pl.col("file"),
-                    pl.concat_list([f"time_{i}" for i in range(len(df_list))]).alias(
-                        "time"
-                    ),
-                )
-                .sort("time", descending=True)
-                .head(opts.top_files)["file"]
-            )
-
-            for f in files:
-                print(f)
-                print_timings(
-                    hierarchize_list([df.filter(pl.col("file") == f) for df in df_list])
-                )
+    run_runtime = _dispatch
+    run_runtime_record = partialmethod(_record, task=OxcamlBenchmark.record_runtime)
+    run_runtime_report = partialmethod(_report, task=OxcamlBenchmark.record_runtime)
 
     parser_fexpr = OptionParser(usage="%prog fexpr [options] ...")
     parser_fexpr.add_option("-j", "--jobs", type=int, dest="jobs")
@@ -1202,42 +1538,45 @@ class Cli:
     run_size = _dispatch
 
     def run_size_report(self, name, parser, opts, args):
-        sizes = self._record(name, parser, opts, args, task=OxcamlBenchmark.report_size)
+        benchmarks = self._record(
+            name, parser, opts, args, task=OxcamlBenchmark.report_size
+        )
 
         df_list = []
-        for i, path in enumerate(sizes):
+        for i, benchmark in enumerate(benchmarks):
+            path = benchmark.size_path
             df_list.append(
                 pl.read_csv(path)
                 .with_columns(
                     pl.col("name").alias("file"),
                     pl.col("name").str.split(".").list.last().alias("ext"),
                 )
+                .with_columns(pl.format(".{}", "ext").alias("ext"))
                 .group_by("ext")
-                .agg(pl.col("size_in_bytes").sum().alias(f"size_in_bytes_{i}"))
+                .agg(pl.col("size_in_bytes").sum().alias(benchmark.shorthand))
             )
-        df = pl.concat(df_list, how="align_left").select(
-            pl.col("ext"),
-            pl.concat_list([f"size_in_bytes_{i}" for i in range(len(sizes))]).alias(
-                "size_in_bytes"
-            ),
-        )
+        df = pl.concat(df_list, how="align_left")
 
-        for ext, sizes in df.iter_rows():
-            main_size, *other_sizes = sizes
-            scale = 1
-            for prefix in ["B", "kB", "MB", "GB"]:
-                if main_size < 1024:
-                    break
-                scale *= 1024
-                main_size /= 1024
-
-            line = f"{ext} {main_size:>6.01f}{prefix} {'----':>5}%"
-            for size in other_sizes:
-                size /= scale
-                percent = (size - main_size) / main_size * 100
-                line += f" {size:>6.01f}{prefix} {percent:+5.01f}%"
-
-            print(line)
+        with pl.Config(
+            tbl_hide_dataframe_shape=True,
+            tbl_hide_column_data_types=True,
+            tbl_formatting="ASCII_MARKDOWN",
+            tbl_rows=-1,
+            tbl_cols=-1,
+            tbl_cell_numeric_alignment="RIGHT",
+        ):
+            df = df.transpose(
+                include_header=True, header_name="configuration", column_names="ext"
+            )
+            df = df.map_columns(
+                pl.selectors.exclude("configuration"),
+                process_size,
+                # lambda s: pl.struct(
+                #     s.map_elements(str_bytes, return_dtype=pl.String),
+                #     (s / s.drop_nulls().first()).round(1).alias(f"{s.name} (rel)"),
+                # ),
+            ).unnest(pl.selectors.exclude("configuration"))
+            print(df)
 
 
 def main():

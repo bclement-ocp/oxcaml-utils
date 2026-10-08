@@ -17,3 +17,5 @@ dev = [
 ox = "ox.cli:main"
 [tool.setuptools.package-data]
 ox = ["*.nix"]
+"ox.vendor.profile2csv" = ["*"]
+"ox.vendor.profile2csv.bin" = ["*"]
