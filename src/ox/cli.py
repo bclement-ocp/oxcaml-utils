@@ -1276,43 +1276,7 @@ class Cli:
 
             df_list.append(df)
 
-        max_depth = opts.max_depth
-
-        column = opts.column or "time"
-        unit = "s" if column == "time" else "B"
-
-        if opts.top_files is None:
-            name, timings = hierarchize_list(df_list, column=column)
-            print_timings(
-                timings, name=name, max_depth=max_depth, unit=unit, abstime=False
-            )
-        else:
-            files = (
-                pl.concat(
-                    [
-                        df.filter(pl.col("pass name").str.contains(pass_pat))
-                        .group_by("file")
-                        .agg(pl.col("time").sum().alias(f"time_{i}"))
-                        for i, df in enumerate(df_list)
-                    ],
-                    how="align_left",
-                )
-                .select(
-                    pl.col("file"),
-                    pl.concat_list([f"time_{i}" for i in range(len(df_list))]).alias(
-                        "time"
-                    ),
-                )
-                .sort("time", descending=True)
-                .head(opts.top_files)["file"]
-            )
-
-            for f in files:
-                print(f)
-                name, timings = hierarchize_list(
-                    [df.filter(pl.col("file") == f) for df in df_list]
-                )
-                print_timings(timings, name=name, max_depth=max_depth)
+        self._analyze(df_list, opts)
 
         df_list = []
         for configuration, profile in profiles:
@@ -1392,6 +1356,46 @@ class Cli:
                 print(pass_df.select(pl.all().exclude("pass name")))
                 print()
 
+
+    def _analyze(self, df_list, opts):
+        max_depth = opts.max_depth
+
+        column = opts.column or "time"
+        unit = "s" if column == "time" else "B"
+
+        if opts.top_files is None:
+            name, timings = hierarchize_list(df_list, column=column)
+            print_timings(
+                timings, name=name, max_depth=max_depth, unit=unit, abstime=False
+            )
+        else:
+            files = (
+                pl.concat(
+                    [
+                        df.filter(pl.col("pass name").str.contains(pass_pat))
+                        .group_by("file")
+                        .agg(pl.col("time").sum().alias(f"time_{i}"))
+                        for i, df in enumerate(df_list)
+                    ],
+                    how="align_left",
+                )
+                .select(
+                    pl.col("file"),
+                    pl.concat_list([f"time_{i}" for i in range(len(df_list))]).alias(
+                        "time"
+                    ),
+                )
+                .sort("time", descending=True)
+                .head(opts.top_files)["file"]
+            )
+
+            for f in files:
+                print(f)
+                name, timings = hierarchize_list(
+                    [df.filter(pl.col("file") == f) for df in df_list]
+                )
+                print_timings(timings, name=name, max_depth=max_depth)
+
     def _dump(self, name, parser, opts, args, *, task, n=None):
         return self._record(
             name, parser, opts, args, task=partial(task, jobs=opts.jobs), n=n
@@ -1462,6 +1466,30 @@ class Cli:
     run_profile = _dispatch
     run_profile_record = partialmethod(_record, task=OxcamlBenchmark.record_profile)
     run_profile_report = partialmethod(_report, task=OxcamlBenchmark.record_profile)
+
+    parser_profile_analyze = OptionParser(usage="%prog profile analyze [options] ...")
+    parser_profile_analyze.add_option(
+        "-p", dest="filter_pass", action="append", help="filter pass name"
+    )
+    parser_profile_analyze.add_option(
+        "-n", dest="top_files", help="only display top N files", type=int
+    )
+    parser_profile_analyze.add_option(
+        "-d", dest="max_depth", help="max depth of passes to print", type=int
+    )
+    parser_profile_analyze.add_option(
+        "-c", dest="column", help="column to print", type=str
+    )
+
+    def run_profile_analyze(self, name, parser, opts, args):
+        df_list = []
+        for path in args:
+            profiles = []
+            for p in pathlib.Path(path).glob("**/*.csv"):
+                append_profile_csv(profiles, p)
+            df_list.append(pl.concat(profiles))
+
+        return self._analyze(df_list, opts)
 
     parser_runtime_report = OptionParser(usage="%prog runtime report [options] ...")
     parser_runtime_report.add_option(
